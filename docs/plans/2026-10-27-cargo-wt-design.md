@@ -1,130 +1,138 @@
-# cargo-wt 设计
+# cargo-wt design
 
-日期：2026-10-27
+Date: 2026-10-27
 
-## 背景
+## Background
 
-Rust 项目开多个 git worktree 时，每个 worktree 的 `target/` 都要完整重编依赖，磁盘占用和编译时间成倍增加。
+With several git worktrees of a Rust project, every worktree's `target/` rebuilds all dependencies from scratch, so disk usage and build time grow with each worktree.
 
-macOS 的 APFS 支持 `clonefile(2)`：克隆文件瞬间完成，克隆前后共享物理块，只有被改写的部分才占新空间。cargo-wt 用它让新 worktree 继承已有 worktree 的构建产物。
+On macOS, APFS supports `clonefile(2)`. A clone is created instantly and shares physical blocks with the original until either side rewrites them. cargo-wt uses it to let a new worktree inherit build artifacts from an existing one.
 
-## 前期实验（ripgrep，cargo 1.96，APFS 系统盘）
+## Preliminary experiment (ripgrep, cargo 1.96, APFS system volume)
 
-| 做法 | 重编 crate 数 | 耗时 | 磁盘新增 |
+| Approach | Crates recompiled | Time | New disk usage |
 |---|---|---|---|
-| 从零构建 | 34 | 16s | 280 MB |
-| `cp -c` 克隆 target | 0 | 0s | ≈0 MB |
-| 克隆后构建 | 9（workspace 成员） | 10s | 154 MB |
-| 克隆 + 对齐源文件 mtime 后构建 | **0** | **0s** | **0 MB** |
+| Clean build | 34 | 16s | 280 MB |
+| `cp -c` clone of target | 0 | 0s | ≈0 MB |
+| Build after clone | 9 (workspace members) | 10s | 154 MB |
+| Build after clone + aligning source mtimes | **0** | **0s** | **0 MB** |
 
-正确性验证：
-- 克隆得到的二进制可以运行。
-- 修改源 worktree 的代码，不会触发新 worktree 重编。
-- 修改新 worktree 的代码，会正确重编对应 crate 及其下游。
+Correctness checks:
+- The cloned binary runs.
+- Editing the source worktree does not trigger rebuilds in the new one.
+- Editing the new worktree rebuilds the affected crate and its dependents.
 
-结论：
-- 第三方依赖与路径无关，克隆后直接复用。
-- workspace 成员重编是因为 checkout 刷新了 mtime，路径本身不是原因。cargo 自己的 dep-info 存的是相对路径。
-- 残留的绝对路径只出现在 rustc 的 `deps/*.d`（cargo 判断新旧时不用它）和 build script 的 `root-output`（cargo 用它在目录移动后重写路径）中，不影响正确性。
+Conclusions:
+- Third-party dependencies do not depend on the worktree path and are reused directly.
+- Workspace members were rebuilt because checkout refreshed their mtimes, not because of the path. Cargo's own dep-info stores relative paths.
+- The remaining absolute paths appear only in two places, and neither affects correctness:
+  - rustc's `deps/*.d`, which cargo does not use for freshness;
+  - build scripts' `root-output`, which cargo uses to rewrite paths after the target directory moves.
 
-**关键约束**：只有内容完全相同的文件才能对齐 mtime。如果给内容不同的文件改成旧的 mtime，cargo 会误判为没有变化，静默编出错误的二进制。
+**Key constraint**: mtimes may be aligned only for files with identical content. If a file whose content differs is given an older mtime, cargo considers it unchanged and silently produces a wrong binary.
 
-## 范围
+## Scope
 
-第一版做以下几项：
+Version 1 includes:
 - `cargo wt add`
 - `cargo wt seed`
-- `post-checkout` hook，以及安装它的 `cargo wt install-hook`
+- a `post-checkout` hook, plus `cargo wt install-hook` to install it
 - `cargo wt du`
 
-不做：
-- `rm` / `gc`：产物放在 worktree 内，`git worktree remove` 会一起删掉。
-- `dedup`：对已有产物做事后去重，以后再考虑。
+Out of scope:
+- `rm` / `gc`: artifacts live inside the worktree, so `git worktree remove` deletes them too.
+- `dedup`: deduplicating existing artifacts after the fact; maybe later.
 
-平台只支持 macOS + APFS。目标不是 APFS 时直接报错，不做降级。
+Platform: macOS + APFS only. A non-APFS target is an error; there is no fallback.
 
-## 产物位置
+## Artifact location
 
-产物放在每个 worktree 自己的 `<worktree>/target`，也就是 cargo 的默认位置，不需要额外配置。
+Artifacts live in each worktree's own `<worktree>/target`. This is cargo's default and needs no configuration.
 
-前提条件：不能设置全局 `CARGO_TARGET_DIR`。它会覆盖默认位置，而且克隆只能在同一个 APFS 卷内进行。
+Prerequisite: no global `CARGO_TARGET_DIR`. It would override the default, and cloning only works within one APFS volume.
 
-## 结构
+## Structure
 
-一个 Rust 二进制 `cargo-wt`，放进 PATH 后以 `cargo wt ...` 调用。两个入口共用核心函数 `seed(new_wt)`：
+A single Rust binary, `cargo-wt`, invoked as `cargo wt ...` once it is on `PATH`. Two entry points share the core function `seed(new_wt)`:
 
-- `cargo wt add <path> [<branch>] [--from <wt>]`：先执行 `git worktree add`，再执行 seed。
-- `post-checkout` hook：满足以下条件时执行 `cargo wt seed <path>`：
-  - 上一个 HEAD 是全零 SHA，也就是这是新建的 worktree；
-  - 仓库里有 `Cargo.toml`。
+- `cargo wt add <git worktree add args...> [--from <wt>]` runs `git worktree add`, then seeds.
+- The `post-checkout` hook runs `cargo wt seed` when both of these hold:
+  - the previous HEAD is the all-zero SHA, i.e. the worktree was just created;
+  - the repository root has a `Cargo.toml`.
 
-### seed 流程
+### seed
 
-1. **选源**
-   - 指定了 `--from` 就直接用它。
-   - 否则从 `git worktree list` 里筛出存在 `target/` 的 worktree。在每个候选里执行 `git diff --name-only <新 HEAD>`，选差异文件最少的那个。
-   - 没有候选时提示后退出，退出码为 0。
-2. **克隆**：对整个 `target` 调用 `clonefile(2)`。如果新 worktree 已经有 `target`，报错，不覆盖。
-3. **对齐 mtime**：遍历新 worktree 的所有已跟踪文件，跳过第 1 步得到的差异文件。其余文件用源 worktree 中对应文件的 mtime 覆盖（相当于 `touch -r`）。
-4. **输出摘要**：源 worktree、对齐的文件数、跳过的差异文件数。
+1. **Pick a source.**
+   - With `--from`, use the given worktree.
+   - Otherwise, consider every worktree from `git worktree list` that has a target directory. Run `git diff --name-only <new HEAD>` in each and pick the one with the fewest differing files.
+   - If there is no candidate, report it and exit with status 0.
+2. **Clone.** Call `clonefile(2)` on the whole target directory. If the new worktree already has one, fail rather than overwrite it.
+3. **Restore hardlinks.** See "Findings during implementation" below.
+4. **Align mtimes.** For every tracked file in the new worktree that is not in the diff set from step 1, copy the mtime of the matching file in the source worktree (like `touch -r`).
+5. **Report.** Print the source worktree, how many files were aligned and how many differing files were skipped.
 
-为什么复制源文件的 mtime，而不是用 commit 时间：这样新 worktree 和源 worktree 的新旧状态完全一致。源 worktree 自己要重编的部分，新 worktree 也会重编，不多也不少。
+**Why copy the source file's mtime rather than use the commit time**: this leaves the new worktree exactly as fresh or stale as its source. Cargo rebuilds what it would have rebuilt in the source, no more and no less.
 
-`git diff --name-only <新 HEAD>` 比较的是源 worktree 的工作区内容，未提交的修改也算作差异，所以**不要求源 worktree 是干净的**。源 worktree 中被忽略、但构建时会读到的文件，在新 worktree 里不存在，cargo 会因为文件缺失而判定需要重编，同样安全。
+**Why the source does not need to be clean**: `git diff --name-only <new HEAD>` compares the source's working tree, so uncommitted changes count as differences. Files that are ignored in the source but read by the build do not exist in the new worktree; cargo sees them as missing and rebuilds, which is also safe.
 
-### 失败处理
+**The new worktree must be clean**: when seeding an existing worktree by hand, modified tracked files would break the "same content as the source" assumption, so seed fails instead.
 
-第 2、3 步中任何一步失败，就删掉已经克隆过来的 `target`，然后以非零退出码退出。绝不留下 mtime 只对齐了一部分的状态。
+**Target directory lookup**: seed asks `cargo metadata` for the target directory, so `build.target-dir` and similar settings are respected. If the directory is outside the worktree (for example, `CARGO_TARGET_DIR` is set), seed fails and says why.
 
-### hook 安装
+### Failure handling
 
-`cargo wt install-hook` 把 hook 写入仓库公共的 `.git/hooks/post-checkout`，所有 worktree 共用。
+If any step after cloning fails, seed deletes the cloned target directory and exits with a non-zero status. It never leaves artifacts with only some mtimes aligned.
 
-- 如果已有 hook，拒绝覆盖并报错，给出手动串联的方法。
-- 不使用全局的 `core.hooksPath`，因为它会让所有仓库自带的 hook 失效。
+### Hook installation
+
+`cargo wt install-hook` writes the hook to the repository's shared `.git/hooks/post-checkout`, which every worktree uses.
+
+- If a hook already exists there, it refuses to overwrite it and explains how to chain it by hand.
+- It does not use a global `core.hooksPath`, which would disable every repository's own hooks.
 
 ## cargo wt du
 
-遍历当前仓库所有 worktree 的 `target/`，对每个文件取两个值：
-- 逻辑大小；
-- 独占大小：用 `getattrlist` 读 `ATTR_CMNEXT_PRIVATESIZE`，表示不和任何克隆共享的字节数。
+`du` walks the target directory of every worktree in the repository and records two values per file:
+- logical size;
+- private size: `ATTR_CMNEXT_PRIVATESIZE` from `getattrlist`, the bytes not shared with any clone.
 
-输出每个 worktree 的逻辑大小和独占大小（删掉这个 worktree 能释放的空间），合计只给两个必然成立的数字：
-- 独占合计：精确值；
-- 逻辑合计：物理占用的上界。
+It prints each worktree's logical size and private size (what deleting that worktree's artifacts would free). The totals include only two numbers that always hold:
+- total private size, which is exact;
+- total logical size, an upper bound on physical usage.
 
-不给下界。最初设想的下界是"独占合计 + 最大的单个共享量"，但它不成立，因为同一个 worktree 内部也存在 clone：cargo 1.96 在 macOS 上用 clone 而不是硬链接，把 `deps/x-<hash>` 放到 `debug/x`。要算精确值需要读 extent 布局，第一版不做。
+There is no lower bound. The original design used "total private + largest single shared amount", but that does not hold because clones also exist inside one worktree: on macOS, cargo 1.96 clones `deps/x-<hash>` to `debug/x` rather than hardlinking it. An exact figure would need the extent layout; version 1 does not do that.
 
-同一个 inode 只计一次。支持 `--json` 输出。
+Each inode is counted once. `--json` is supported.
 
-`ATTR_CMNEXT_PRIVATESIZE` 的语义已经实测：一个 50 MB 文件克隆两份后，三份的独占大小都是 0；其中一份覆写 4 MB 后，它的独占大小变成 4 MB，另外两份仍为 0。
+The semantics of `ATTR_CMNEXT_PRIVATESIZE` were verified: after cloning a 50 MB file twice, all three copies report a private size of 0. After overwriting 4 MB of one copy, that copy reports 4 MB and the other two still report 0.
 
-## 实现中的发现
+## Findings during implementation
 
-- **clonefile 会拆开硬链接**：对目录调用 `clonefile` 时，目录里的硬链接会变成各自独立的 clone。rustc 增量编译把 `deps/*.rcgu.o` 和 `incremental/` 下的文件硬链接在一起，拆开后逻辑大小会虚增：ripgrep 上多出约 40 MB。seed 在克隆之后、对齐 mtime 之前，会按源目录的硬链接关系重建这些硬链接。这一步失败同样会触发清理。
-- **新 worktree 必须干净**：手动对一个已经存在的 worktree 执行 seed 时，如果它的已跟踪文件有修改，"内容与源相同"这个判断就不成立，因此直接报错。
-- **产物目录用 `cargo metadata` 取得**：这样能兼容 `build.target-dir` 等配置。如果产物目录不在 worktree 内（比如设置了 `CARGO_TARGET_DIR`），就报错并提示原因。
+**clonefile splits hardlinks.** Cloning a directory turns its hardlinks into independent clones. rustc's incremental compilation hardlinks `deps/*.rcgu.o` with files under `incremental/`, and splitting them inflates logical size; on ripgrep the difference was about 40 MB. After cloning and before aligning mtimes, seed recreates the hardlinks of the source directory. A failure in this step also triggers cleanup.
 
-## 测试
+## Testing
 
-核心风险是静默编出错误的二进制，因此测试的标准是**产物和从零构建的结果一致**。
+The main risk is silently producing a wrong binary, so the criterion is that **artifacts behave exactly like a clean build**.
 
-测试夹具是一个离线、无外部依赖的 workspace：crate `a`，以及依赖它的 `b`，`b` 的二进制打印 `a` 里的一个常量。每个场景都实际运行二进制、检查输出。
+The fixture is an offline workspace with no external dependencies: crate `a`, and crate `b`, which depends on `a` and prints one of its constants. Every scenario runs the binary and checks its output.
 
-| 场景 | 预期 |
+| Scenario | Expected |
 |---|---|
-| 新 worktree 与源 worktree 在同一个 commit | 重编 0 个 |
-| 新分支修改了 `a` | `a`、`b` 重编，输出新值 |
-| 源 worktree 有未提交的修改 | 新 worktree 按自己 commit 的内容重编，输出正确 |
-| 源 worktree 的产物已过期 | 重编的集合和源 worktree 自己会重编的集合相同 |
-| 新 worktree 已有 `target` | 报错，不覆盖 |
-| 在对齐 mtime 阶段注入失败 | `target` 被删除，非零退出 |
-| `git worktree add` 触发 hook | 自动 seed |
-| 非 Rust 仓库触发 hook | 什么都不做 |
-| 已有 hook 时执行 `install-hook` | 拒绝覆盖 |
+| New worktree at the same commit as the source | 0 crates recompiled |
+| New branch changes `a` | `a` and `b` recompiled; new value printed |
+| Source has uncommitted changes | New worktree rebuilds from its own commit's content; correct output |
+| Source artifacts are stale | Same set recompiled as the source itself would |
+| Source has hardlinks | Same hardlink groups in the new worktree |
+| New worktree already has a target directory | Error; nothing overwritten |
+| Failure injected while aligning mtimes | Target directory removed; non-zero exit |
+| `CARGO_TARGET_DIR` points outside the worktree | Error with a hint |
+| `git worktree add` with the hook installed | Seeded automatically |
+| `cargo wt add` with the hook installed | Seeded exactly once |
+| Hook in a non-Rust repository | Nothing happens |
+| `install-hook` with an existing foreign hook | Refuses to overwrite |
 
-单元测试覆盖三块：选源逻辑、hook 参数解析、差异文件集合的计算。
+Unit tests cover worktree list parsing, null-SHA detection, totals and size formatting.
 
-测试的临时目录必须在 APFS 上，不满足时直接失败，不跳过。
+The test temp directory must be on APFS; otherwise the tests fail instead of being skipped.
 
-发版前，在 ripgrep 上重跑一遍前期实验，作为冒烟测试。
+Before each release, rerun the experiment on ripgrep as a smoke test.

@@ -1,4 +1,4 @@
-//! du：按 APFS 独占大小统计各 worktree 的产物占用。
+//! du: per-worktree artifact usage, based on APFS private size.
 
 use crate::{apfs, git, seed};
 use anyhow::{Context, Result};
@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 pub struct Usage {
     pub worktree: PathBuf,
     pub present: bool,
-    /// 已分配字节数
+    /// Allocated bytes
     pub logical: u64,
-    /// 不与任何 clone 共享的字节数，即删掉该产物可释放的空间
+    /// Bytes not shared with any clone, i.e. what deleting these artifacts frees
     pub private: u64,
 }
 
@@ -33,13 +33,13 @@ pub fn collect(dir: &Path) -> Result<Vec<Usage>> {
 }
 
 fn walk(dir: &Path, seen: &mut HashSet<u64>, u: &mut Usage) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("读取 {}", dir.display()))? {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let path = entry?.path();
         let meta = std::fs::symlink_metadata(&path).with_context(|| format!("stat {}", path.display()))?;
         if meta.is_dir() {
             walk(&path, seen, u)?;
         } else if meta.is_file() && seen.insert(meta.ino()) {
-            // cargo 会把 deps/ 下的产物硬链接到上层，同一 inode 只算一次
+            // rustc hardlinks incremental outputs; count each inode once
             u.logical += meta.blocks() * 512;
             u.private += apfs::private_size(&path)?;
         }
@@ -47,9 +47,10 @@ fn walk(dir: &Path, seen: &mut HashSet<u64>, u: &mut Usage) -> Result<()> {
     Ok(())
 }
 
-/// 只给出必然成立的数字。共享块被多少个文件共享（包括同一 worktree 内
-/// cargo 自己做的 clone，如 `deps/x-<hash>` 与 `debug/x`）无法从独占大小推出，
-/// 所以物理占用只有上界（逻辑合计），没有下界。
+/// Only numbers that always hold. How many files share a block (including
+/// clones cargo makes inside one worktree, such as `deps/x-<hash>` and
+/// `debug/x`) cannot be derived from private sizes, so physical usage has an
+/// upper bound (total logical) but no lower bound.
 pub struct Totals {
     pub logical: u64,
     pub private: u64,
@@ -75,7 +76,7 @@ pub fn human(bytes: u64) -> String {
 
 pub fn print_table(usages: &[Usage]) {
     let width = usages.iter().map(|u| u.worktree.as_os_str().len()).max().unwrap_or(8).max(8);
-    println!("{:<width$}  {:>10}  {:>10}", "worktree", "逻辑", "独占");
+    println!("{:<width$}  {:>10}  {:>10}", "worktree", "logical", "private");
     for u in usages {
         if u.present {
             println!("{:<width$}  {:>10}  {:>10}", u.worktree.display(), human(u.logical), human(u.private));
@@ -85,7 +86,7 @@ pub fn print_table(usages: &[Usage]) {
     }
     let t = totals(usages);
     println!(
-        "合计：逻辑 {}（物理占用上限）· 独占 {}（删掉对应产物可释放）",
+        "total: logical {} (upper bound of physical usage) · private {} (freed by deleting the artifacts)",
         human(t.logical),
         human(t.private)
     );

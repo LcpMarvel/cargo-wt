@@ -1,4 +1,4 @@
-//! macOS / APFS 系统调用：clonefile、独占大小、mtime。
+//! macOS / APFS system calls: clonefile, private size, mtime.
 
 use anyhow::{Context, Result, bail};
 use std::ffi::{CStr, CString};
@@ -8,7 +8,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 fn cpath(p: &Path) -> Result<CString> {
-    CString::new(p.as_os_str().as_bytes()).with_context(|| format!("路径含 NUL: {}", p.display()))
+    CString::new(p.as_os_str().as_bytes()).with_context(|| format!("path contains NUL: {}", p.display()))
 }
 
 pub fn ensure_apfs(p: &Path) -> Result<()> {
@@ -19,7 +19,7 @@ pub fn ensure_apfs(p: &Path) -> Result<()> {
     }
     let fs = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) }.to_string_lossy();
     if fs != "apfs" {
-        bail!("{} 位于 {fs} 文件系统上，cargo-wt 只支持 APFS", p.display());
+        bail!("{} is on a {fs} filesystem; cargo-wt only supports APFS", p.display());
     }
     Ok(())
 }
@@ -28,12 +28,12 @@ pub fn ensure_same_volume(a: &Path, b: &Path) -> Result<()> {
     let da = std::fs::metadata(a).with_context(|| format!("stat {}", a.display()))?.dev();
     let db = std::fs::metadata(b).with_context(|| format!("stat {}", b.display()))?.dev();
     if da != db {
-        bail!("{} 与 {} 不在同一个卷上，无法 clone", a.display(), b.display());
+        bail!("{} and {} are on different volumes; cannot clone", a.display(), b.display());
     }
     Ok(())
 }
 
-/// 递归克隆整个目录树；`dst` 必须不存在。
+/// Recursively clone a whole directory tree; `dst` must not exist.
 pub fn clone_tree(src: &Path, dst: &Path) -> Result<()> {
     let (s, d) = (cpath(src)?, cpath(dst)?);
     if unsafe { libc::clonefile(s.as_ptr(), d.as_ptr(), 0) } != 0 {
@@ -43,7 +43,8 @@ pub fn clone_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 把 `dst` 的 mtime 设为 `src_meta` 的 mtime（纳秒精度），不跟随符号链接，atime 不变。
+/// Set `dst`'s mtime to `src_meta`'s (nanosecond precision), without following
+/// symlinks and leaving atime untouched.
 pub fn copy_mtime(src_meta: &std::fs::Metadata, dst: &Path) -> Result<()> {
     let d = cpath(dst)?;
     let times = [
@@ -51,7 +52,7 @@ pub fn copy_mtime(src_meta: &std::fs::Metadata, dst: &Path) -> Result<()> {
         libc::timespec { tv_sec: src_meta.mtime(), tv_nsec: src_meta.mtime_nsec() },
     ];
     if unsafe { libc::utimensat(libc::AT_FDCWD, d.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
-        return Err(io::Error::last_os_error()).with_context(|| format!("设置 mtime {}", dst.display()));
+        return Err(io::Error::last_os_error()).with_context(|| format!("set mtime {}", dst.display()));
     }
     Ok(())
 }
@@ -72,7 +73,7 @@ struct PrivateSizeReply {
     private_size: libc::off_t,
 }
 
-/// 文件中不与任何 clone 共享的字节数（ATTR_CMNEXT_PRIVATESIZE）。
+/// Bytes of a file not shared with any clone (ATTR_CMNEXT_PRIVATESIZE).
 pub fn private_size(p: &Path) -> Result<u64> {
     let c = cpath(p)?;
     let mut al: libc::attrlist = unsafe { std::mem::zeroed() };
@@ -93,7 +94,7 @@ pub fn private_size(p: &Path) -> Result<u64> {
         return Err(io::Error::last_os_error()).with_context(|| format!("getattrlist {}", p.display()));
     }
     if reply.returned.fork & libc::ATTR_CMNEXT_PRIVATESIZE == 0 {
-        bail!("{} 未返回 PRIVATESIZE", p.display());
+        bail!("{}: PRIVATESIZE not returned", p.display());
     }
     Ok(u64::try_from(reply.private_size)?)
 }

@@ -1,4 +1,4 @@
-//! 对 git 命令行的薄封装。所有失败都带上 git 的 stderr 直接返回。
+//! Thin wrapper over the git CLI. Every failure carries git's stderr.
 
 use anyhow::{Context, Result, bail};
 use std::collections::HashSet;
@@ -13,10 +13,10 @@ fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
         .arg(dir)
         .args(args)
         .output()
-        .with_context(|| format!("无法执行 git {}", args.join(" ")))?;
+        .with_context(|| format!("failed to run git {}", args.join(" ")))?;
     if !out.status.success() {
         bail!(
-            "git {} 在 {} 失败: {}",
+            "git {} failed in {}: {}",
             args.join(" "),
             dir.display(),
             String::from_utf8_lossy(&out.stderr).trim()
@@ -28,7 +28,7 @@ fn run(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
 fn run_line(dir: &Path, args: &[&str]) -> Result<String> {
     let out = run(dir, args)?;
     Ok(String::from_utf8(out)
-        .context("git 输出不是 UTF-8")?
+        .context("git output is not UTF-8")?
         .trim_end_matches('\n')
         .to_owned())
 }
@@ -42,7 +42,7 @@ fn split_nul(bytes: &[u8]) -> impl Iterator<Item = PathBuf> + '_ {
 
 pub fn toplevel(dir: &Path) -> Result<PathBuf> {
     let top = run_line(dir, &["rev-parse", "--show-toplevel"])?;
-    std::fs::canonicalize(&top).with_context(|| format!("无法解析路径 {top}"))
+    std::fs::canonicalize(&top).with_context(|| format!("failed to resolve {top}"))
 }
 
 pub fn head(dir: &Path) -> Result<String> {
@@ -60,22 +60,22 @@ pub fn config(dir: &Path, key: &str) -> Result<Option<String>> {
         .arg(dir)
         .args(["config", "--get", key])
         .output()
-        .context("无法执行 git config")?;
-    // git config --get: 1 表示键不存在
+        .context("failed to run git config")?;
+    // git config --get exits with 1 when the key is not set
     match out.status.code() {
         Some(0) => Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())),
         Some(1) => Ok(None),
-        _ => bail!("git config --get {key} 失败: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        _ => bail!("git config --get {key} failed: {}", String::from_utf8_lossy(&out.stderr).trim()),
     }
 }
 
-/// 所有非 bare、目录仍存在的 worktree，主 worktree 在最前，路径已规范化。
+/// All non-bare worktrees whose directory still exists, main worktree first, canonicalized.
 pub fn worktrees(dir: &Path) -> Result<Vec<PathBuf>> {
     let out = run_line(dir, &["worktree", "list", "--porcelain"])?;
     parse_worktree_list(&out)
         .into_iter()
         .filter(|p| p.is_dir())
-        .map(|p| std::fs::canonicalize(&p).with_context(|| format!("无法解析路径 {}", p.display())))
+        .map(|p| std::fs::canonicalize(&p).with_context(|| format!("failed to resolve {}", p.display())))
         .collect()
 }
 
@@ -98,7 +98,8 @@ pub fn parse_worktree_list(porcelain: &str) -> Vec<PathBuf> {
     result
 }
 
-/// `dir` 的工作区内容与 `commit` 有差异的文件（含未提交修改，不含未跟踪文件）。
+/// Files whose content in `dir`'s working tree differs from `commit`
+/// (uncommitted changes included, untracked files excluded).
 pub fn diff_names(dir: &Path, commit: &str) -> Result<HashSet<PathBuf>> {
     let out = run(dir, &["diff", "--name-only", "--no-renames", "-z", commit, "--"])?;
     Ok(split_nul(&out).collect())
@@ -109,7 +110,7 @@ pub fn tracked_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(split_nul(&out).collect())
 }
 
-/// 已跟踪文件是否与 HEAD 完全一致（忽略未跟踪文件）。
+/// Whether every tracked file matches HEAD (untracked files are ignored).
 pub fn tracked_clean(dir: &Path) -> Result<bool> {
     let out = run(dir, &["status", "--porcelain", "--untracked-files=no", "-z"])?;
     Ok(out.is_empty())

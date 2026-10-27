@@ -13,9 +13,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// 在 macOS APFS 上让新 git worktree 通过 clonefile 继承已有的 Rust 构建产物
+/// Let new git worktrees inherit Rust build artifacts via APFS clonefile on macOS
 #[derive(Parser)]
-#[command(name = "cargo wt", version)]
+#[command(name = "cargo wt", bin_name = "cargo wt", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -23,28 +23,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// git worktree add，然后继承产物；其余参数原样传给 git
+    /// Run `git worktree add`, then inherit artifacts; remaining args go to git unchanged
     Add {
-        /// 指定产物来源 worktree，默认自动选差异最小的
+        /// Worktree to inherit from; defaults to the one that differs least
         #[arg(long)]
         from: Option<PathBuf>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         git_args: Vec<OsString>,
     },
-    /// 让已建好的 worktree 继承产物
+    /// Inherit artifacts into an existing worktree
     Seed {
         path: PathBuf,
         #[arg(long)]
         from: Option<PathBuf>,
     },
-    /// 在本仓库安装 post-checkout hook，使任何方式新建的 worktree 都自动继承产物
+    /// Install a post-checkout hook so every new worktree of this repository inherits artifacts
     InstallHook,
-    /// 统计各 worktree 产物的逻辑与独占大小
+    /// Show logical and private (unshared) artifact size per worktree
     Du {
         #[arg(long)]
         json: bool,
     },
-    /// 由 git hook 调用
+    /// Called by the git hook
     #[command(hide = true)]
     Hook {
         #[command(subcommand)]
@@ -60,12 +60,12 @@ enum HookKind {
 pub fn report(outcome: Option<seed::Outcome>) {
     match outcome {
         Some(o) => eprintln!(
-            "cargo-wt: 已从 {} 继承产物（对齐 {} 个文件，{} 个差异文件保留新 mtime）",
+            "cargo-wt: inherited artifacts from {} ({} files aligned, {} differing files keep a fresh mtime)",
             o.source.display(),
             o.aligned,
             o.skipped
         ),
-        None => eprintln!("cargo-wt: 没有可继承产物的 worktree，跳过"),
+        None => eprintln!("cargo-wt: no worktree with artifacts to inherit from; skipped"),
     }
 }
 
@@ -77,20 +77,20 @@ fn add(from: Option<PathBuf>, git_args: Vec<OsString>) -> Result<()> {
         .args(&git_args)
         .env(hook::SKIP_ENV, "1")
         .status()
-        .context("无法执行 git worktree add")?;
+        .context("failed to run git worktree add")?;
     if !status.success() {
-        bail!("git worktree add 失败");
+        bail!("git worktree add failed");
     }
     let mut created: Vec<_> = git::worktrees(&cwd)?.into_iter().filter(|w| !before.contains(w)).collect();
     if created.len() != 1 {
-        bail!("无法确定新建的 worktree（新增 {} 个）", created.len());
+        bail!("cannot tell which worktree was created ({} new)", created.len());
     }
     report(seed::seed(&created.remove(0), from.as_deref())?);
     Ok(())
 }
 
 fn main() -> Result<()> {
-    // 作为 `cargo wt ...` 调用时，cargo 会把 "wt" 作为第一个参数传入
+    // When invoked as `cargo wt ...`, cargo passes "wt" as the first argument
     let mut args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "wt") {
         args.remove(1);
@@ -103,7 +103,7 @@ fn main() -> Result<()> {
         }
         Cmd::InstallHook => {
             let path = hook::install(&std::env::current_dir()?)?;
-            eprintln!("cargo-wt: hook 已安装在 {}", path.display());
+            eprintln!("cargo-wt: hook installed at {}", path.display());
             Ok(())
         }
         Cmd::Du { json } => {

@@ -6,8 +6,6 @@ When a new worktree matches its source, it needs no rebuilds and takes no extra 
 
 On ripgrep, a fresh worktree normally needs 34 crates rebuilt and 280 MB of new disk space. With cargo-wt it needs **0 crates and ~0 MB**.
 
-[中文说明](#中文说明)
-
 ## Install
 
 ```sh
@@ -54,16 +52,3 @@ The design notes and experiment data are in [docs/plans](docs/plans/2026-10-27-c
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
-
----
-
-## 中文说明
-
-在 macOS APFS 上用 `clonefile`，让新建的 git worktree 继承已有 worktree 的 Rust 构建产物。内容相同的部分零重编，也不占额外空间。
-
-```sh
-cargo install --git https://github.com/LcpMarvel/cargo-wt
-cargo wt install-hook    # 每个仓库执行一次，之后任何方式新建的 worktree 都会自动继承产物
-```
-
-前提：产物在 worktree 内，不要设置 `CARGO_TARGET_DIR` / `build.target-dir`。设计与实验数据见 [docs/plans](docs/plans/2026-10-27-cargo-wt-design.md)。

@@ -1,4 +1,4 @@
-//! post-checkout hook 的安装与处理。
+//! Installing and handling the post-checkout hook.
 
 use crate::{git, seed};
 use anyhow::{Context, Result, bail};
@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const MARKER: &str = "# installed by cargo-wt";
-/// `cargo wt add` 自己负责 seed，通过该变量让 hook 跳过。
+/// `cargo wt add` seeds on its own and uses this variable to make the hook skip.
 pub const SKIP_ENV: &str = "CARGO_WT_SKIP_HOOK";
 
 fn script() -> String {
@@ -15,27 +15,28 @@ fn script() -> String {
 
 pub fn install(dir: &Path) -> Result<PathBuf> {
     if let Some(p) = git::config(dir, "core.hooksPath")? {
-        bail!("本仓库设置了 core.hooksPath={p}，请在该目录的 post-checkout 中调用: cargo-wt hook post-checkout \"$@\"");
+        bail!("core.hooksPath is set to {p}; call this from the post-checkout hook there: cargo-wt hook post-checkout \"$@\"");
     }
     let hooks = git::common_dir(dir)?.join("hooks");
     let path = hooks.join("post-checkout");
     if path.exists() {
-        let existing = std::fs::read_to_string(&path).with_context(|| format!("读取 {}", path.display()))?;
+        let existing = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         if existing.contains(MARKER) {
             return Ok(path);
         }
         bail!(
-            "{} 已存在，拒绝覆盖；请在其中追加一行: cargo-wt hook post-checkout \"$@\"",
+            "{} already exists; refusing to overwrite. Append this line to it: cargo-wt hook post-checkout \"$@\"",
             path.display()
         );
     }
-    std::fs::create_dir_all(&hooks).with_context(|| format!("创建 {}", hooks.display()))?;
-    std::fs::write(&path, script()).with_context(|| format!("写入 {}", path.display()))?;
+    std::fs::create_dir_all(&hooks).with_context(|| format!("create {}", hooks.display()))?;
+    std::fs::write(&path, script()).with_context(|| format!("write {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
     Ok(path)
 }
 
-/// `git worktree add` 触发 post-checkout 时，前一个 HEAD 是全零 SHA（SHA-1 或 SHA-256）。
+/// When `git worktree add` triggers post-checkout, the previous HEAD is the
+/// all-zero SHA (SHA-1 or SHA-256).
 pub fn is_null_sha(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b == b'0')
 }

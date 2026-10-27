@@ -1,5 +1,5 @@
-//! 端到端测试：判据是继承产物后的二进制与从零构建的输出一致。
-//! 夹具是离线可编译的 workspace：b 打印 a::VALUE。
+//! End-to-end tests: after inheriting artifacts, binaries must behave exactly like a clean build.
+//! The fixture is an offline workspace in which b prints a::VALUE.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -49,7 +49,7 @@ fn write(dir: &Path, rel: &str, content: &str) {
 fn check(out: Output, what: &str) -> Output {
     assert!(
         out.status.success(),
-        "{what} 失败:\n{}\n{}",
+        "{what} failed:\n{}\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -70,7 +70,7 @@ fn cargo(dir: &Path, args: &[&str]) -> Output {
     check(out, &format!("cargo {args:?}"))
 }
 
-/// 构建并返回被重新编译的 crate 名
+/// Build and return the names of recompiled crates
 fn build(dir: &Path) -> Vec<String> {
     let out = cargo(dir, &["build", "-v", "--offline"]);
     String::from_utf8_lossy(&out.stderr)
@@ -81,7 +81,7 @@ fn build(dir: &Path) -> Vec<String> {
 }
 
 fn run_b(dir: &Path) -> String {
-    let out = check(Command::new(dir.join("target/debug/b")).output().unwrap(), "运行 b");
+    let out = check(Command::new(dir.join("target/debug/b")).output().unwrap(), "run b");
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
@@ -126,13 +126,13 @@ fn preserves_hardlinks() {
     let wt = f.wt("wt");
     git(&f.main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
     check(seed(&f, &wt), "seed");
-    // rustc 增量编译把 deps/*.rcgu.o 与 incremental/ 下的文件硬链接
+    // rustc's incremental compilation hardlinks deps/*.rcgu.o with files under incremental/
     let src = hardlink_groups(&f.main.join("target"));
-    assert!(!src.is_empty(), "夹具应产生硬链接");
+    assert!(!src.is_empty(), "fixture should produce hardlinks");
     assert_eq!(hardlink_groups(&wt.join("target")), src);
 }
 
-/// 按 inode 分组的硬链接相对路径集合
+/// Relative paths of hardlinked files, grouped by inode
 fn hardlink_groups(root: &Path) -> std::collections::BTreeSet<Vec<PathBuf>> {
     use std::os::unix::fs::MetadataExt;
     fn walk(root: &Path, dir: &Path, m: &mut std::collections::HashMap<u64, Vec<PathBuf>>) {
@@ -170,7 +170,7 @@ fn branch_with_changed_crate_rebuilds_it_and_downstream() {
     check(seed(&f, &wt), "seed");
     assert_eq!(build(&wt), ["a", "b"]);
     assert_eq!(run_b(&wt), "2");
-    // 源 worktree 不受影响
+    // The source worktree is unaffected
     assert_eq!(build(&f.main), Vec::<String>::new());
     assert_eq!(run_b(&f.main), "1");
 }
@@ -214,7 +214,7 @@ fn refuses_existing_target() {
     std::fs::create_dir(wt.join("target")).unwrap();
     let out = seed(&f, &wt);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("已存在"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("already exists"), "{}", stderr(&out));
 }
 
 #[test]
@@ -228,7 +228,7 @@ fn failure_while_aligning_removes_cloned_target() {
     let out = seed(&f, &wt);
     check(Command::new("chflags").arg("nouchg").arg(&locked).output().unwrap(), "chflags");
     assert!(!out.status.success());
-    assert!(!wt.join("target").exists(), "失败后不应留下产物");
+    assert!(!wt.join("target").exists(), "no artifacts should be left behind after a failure");
 }
 
 #[test]
@@ -292,13 +292,13 @@ fn hook_ignores_non_rust_repo() {
 fn install_hook_refuses_foreign_hook_and_is_idempotent() {
     let f = Fixture::new();
     check(cargo_wt(&f.main, &["install-hook"]), "install-hook");
-    check(cargo_wt(&f.main, &["install-hook"]), "再次 install-hook");
+    check(cargo_wt(&f.main, &["install-hook"]), "install-hook again");
 
     let g = Fixture::new();
     write(&g.main, ".git/hooks/post-checkout", "#!/bin/sh\necho mine\n");
     let out = cargo_wt(&g.main, &["install-hook"]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("拒绝覆盖"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("refusing to overwrite"), "{}", stderr(&out));
 }
 
 #[test]
@@ -307,7 +307,7 @@ fn add_seeds_once_even_with_hook_installed() {
     build(&f.main);
     check(cargo_wt(&f.main, &["install-hook"]), "install-hook");
     let wt = f.wt("wt");
-    // 模拟 `cargo wt add ...`：cargo 会把 "wt" 作为第一个参数传入
+    // Simulate `cargo wt add ...`: cargo passes "wt" as the first argument
     check(cargo_wt(&f.main, &["wt", "add", "-q", wt.to_str().unwrap()]), "add");
     assert_eq!(build(&wt), Vec::<String>::new());
     assert_eq!(run_b(&wt), "1");
@@ -328,7 +328,7 @@ fn du_reports_shared_artifacts() {
         let logical = w["logical_bytes"].as_u64().unwrap();
         let private = w["private_bytes"].as_u64().unwrap();
         assert!(logical > 0);
-        // 刚克隆完、未构建：几乎全部共享
-        assert!(private * 10 < logical, "独占 {private} 应远小于逻辑 {logical}");
+        // Just cloned, not built yet: almost everything is shared
+        assert!(private * 10 < logical, "private {private} should be far below logical {logical}");
     }
 }
