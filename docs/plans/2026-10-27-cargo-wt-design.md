@@ -89,15 +89,21 @@ macOS 的 APFS 支持 `clonefile(2)`：克隆文件瞬间完成，克隆前后�
 - 逻辑大小；
 - 独占大小：用 `getattrlist` 读 `ATTR_CMNEXT_PRIVATESIZE`，表示不和任何克隆共享的字节数。
 
-输出每个 worktree 的逻辑大小，以及独占大小（即删掉这个 worktree 能释放的空间）。共享部分只给上下界：
-- 下界：独占合计 + 最大的单个共享量；
-- 上界：独占合计 + 共享量之和。
+输出每个 worktree 的逻辑大小和独占大小（删掉这个 worktree 能释放的空间），合计只给两个必然成立的数字：
+- 独占合计：精确值；
+- 逻辑合计：物理占用的上界。
 
-要算精确值需要读 extent 布局，第一版不做。
+不给下界。最初设想的下界是"独占合计 + 最大的单个共享量"，但它不成立，因为同一个 worktree 内部也存在 clone：cargo 1.96 在 macOS 上用 clone 而不是硬链接，把 `deps/x-<hash>` 放到 `debug/x`。要算精确值需要读 extent 布局，第一版不做。
 
-支持 `--json` 输出。
+同一个 inode 只计一次。支持 `--json` 输出。
 
-实现的第一步：先写一个小程序，验证 `ATTR_CMNEXT_PRIVATESIZE` 对克隆文件的计算语义。如果不符合预期，`du` 直接报错，不输出可能误导人的数字。
+`ATTR_CMNEXT_PRIVATESIZE` 的语义已经实测：一个 50 MB 文件克隆两份后，三份的独占大小都是 0；其中一份覆写 4 MB 后，它的独占大小变成 4 MB，另外两份仍为 0。
+
+## 实现中的发现
+
+- **clonefile 会拆开硬链接**：对目录调用 `clonefile` 时，目录里的硬链接会变成各自独立的 clone。rustc 增量编译把 `deps/*.rcgu.o` 和 `incremental/` 下的文件硬链接在一起，拆开后逻辑大小会虚增：ripgrep 上多出约 40 MB。seed 在克隆之后、对齐 mtime 之前，会按源目录的硬链接关系重建这些硬链接。这一步失败同样会触发清理。
+- **新 worktree 必须干净**：手动对一个已经存在的 worktree 执行 seed 时，如果它的已跟踪文件有修改，"内容与源相同"这个判断就不成立，因此直接报错。
+- **产物目录用 `cargo metadata` 取得**：这样能兼容 `build.target-dir` 等配置。如果产物目录不在 worktree 内（比如设置了 `CARGO_TARGET_DIR`），就报错并提示原因。
 
 ## 测试
 
