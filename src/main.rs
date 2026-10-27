@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "macos"))]
+compile_error!("cargo-wt only supports macOS (APFS clonefile)");
+
 mod apfs;
 mod du;
 mod git;

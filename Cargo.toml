@@ -2,6 +2,12 @@
 name = "cargo-wt"
 version = "0.1.0"
 edition = "2024"
+description = "Let new git worktrees inherit Rust build artifacts via APFS clonefile on macOS"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LcpMarvel/cargo-wt"
+readme = "README.md"
+keywords = ["cargo", "worktree", "apfs", "macos", "build"]
+categories = ["development-tools::cargo-plugins"]
 
 [dependencies]
 anyhow = "1.0.104"
